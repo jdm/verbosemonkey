@@ -27,7 +27,6 @@ struct Token
     COMMA,
     LPAREN,
     RPAREN,
-    PROPERTY_ACCESS,
     EQUALS,
     EOL
   } type;
@@ -224,21 +223,6 @@ namespace ast
     std::string name_;
   };
 
-  class PropertyAccess : public Expr
-  {
-   public:
-    PropertyAccess(Expr *owner, Expr *property)
-    : owner_(owner), property_(property) {}
-    std::string toString()
-    {
-      return owner_->toString() + "  " + property_->toString();
-    }
-
-   private:
-    Expr *owner_;
-    Expr *property_;
-  };
-
   class Dim : public Node
   {
    public:
@@ -393,45 +377,33 @@ ast::Expr *parseIdentifier(TokenIt &it, const TokenIt &end)
   
   std::string identifier = current->value;
   current = nextToken(it, end);
-  if(!current || (current->type != Token::LPAREN &&
-                 current->type != Token::PROPERTY_ACCESS))
+  if(!current || current->type != Token::LPAREN)
     return new ast::Identifier(identifier);
 
-  if(current->type == Token::LPAREN)
-  {
-    current = nextToken(it, end);
-    EXPECT_ANY_TOKEN(current, errorE, "Expression or ')' expected");
-    
-    std::vector<ast::Expr *> args;
-    if(current->type != Token::RPAREN)
-      while(1)
-      {
-        ast::Expr *arg = parseExpr(it, end);
-        if(!arg) return NULL;
-        args.push_back(arg);
-
-        current = currentToken(it, end);
-        EXPECT_ANY_TOKEN(current, errorE, "Expected ')' or ','");
-
-        if(current->type == Token::RPAREN)
-          break;
-        else if(current->type != Token::COMMA)
-          return errorE("Expected ')' or ','");
-
-        current = nextToken(it, end);
-      }
-
-    nextToken(it, end);
-    return new ast::CallExpr(identifier, args);
-  }
-
   current = nextToken(it, end);
-  EXPECT_TOKEN_E(current, Token::IDENTIFIER, "Identifier expected after '.'");
+  EXPECT_ANY_TOKEN(current, errorE, "Expression or ')' expected");
+    
+  std::vector<ast::Expr *> args;
+  if(current->type != Token::RPAREN)
+    while(1)
+    {
+      ast::Expr *arg = parseExpr(it, end);
+      if(!arg) return NULL;
+      args.push_back(arg);
 
-  ast::Expr *property = parseIdentifier(it, end);
-  //if(!property)
-    return errorE("Identifier expected after '.'");
-  //return new ast::PropertyAccess(identifier, property);
+      current = currentToken(it, end);
+      EXPECT_ANY_TOKEN(current, errorE, "Expected ')' or ','");
+
+      if(current->type == Token::RPAREN)
+        break;
+      else if(current->type != Token::COMMA)
+        return errorE("Expected ')' or ','");
+
+      current = nextToken(it, end);
+    }
+
+  nextToken(it, end);
+  return new ast::CallExpr(identifier, args);
 }
 
 ast::Expr *parsePrimary(TokenIt &it, const TokenIt &end)
@@ -589,20 +561,32 @@ ASTNodeList *generateAST(const TokenList &tokens)
   {
     node = parseTopLevel(it, end);
     if(node)
-      ast->push_back(node);
+      ast->push_front(node);
     else break;
   }
   return ast;
 }
 
-int main(int /*argc*/, char */*argv*/[])
+int main(int argc, char *argv[])
 {
-  std::list<Token *> tokens;
+  bool showPrompt = true;
+  for(int i = 1; i < argc; i++)
+  {
+    if(!std::strcmp(argv[i], "--no-prompt"))
+    {
+       showPrompt = false;
+       continue;
+    }
+
+    std::cout << "unhandled: " << argv[i] << std::endl;
+  }
+  
+  TokenList tokens;
 
   do
   {
     tokens.clear();
-    std::cout << "> ";
+    if(showPrompt) std::cout << "> ";
     
     while(1)
     {
@@ -622,6 +606,6 @@ int main(int /*argc*/, char */*argv*/[])
     std::cin.clear();
   } while(tokens.size());
 
-  std::cout << std::endl;
+  if(showPrompt) std::cout << std::endl;
   return 0;
 }

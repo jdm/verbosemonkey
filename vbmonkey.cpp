@@ -28,6 +28,7 @@ struct Token
     LPAREN,
     RPAREN,
     PROPERTY_ACCESS,
+    EQUALS,
     EOL
   } type;
 
@@ -58,8 +59,9 @@ struct SingleToken {
   { '*', Token::OP },
   { '/', Token::OP },
   { '%', Token::OP },
-  { '.', Token::PROPERTY_ACCESS },
-  { ',', Token::COMMA }//,
+  { '.', Token::OP },
+  { ',', Token::COMMA },
+  { '=', Token::EQUALS },
   //  { '\n', Token::EOL }
 };
 
@@ -216,20 +218,43 @@ namespace ast
   {
    public:
     Identifier(const std::string &name) : name_(name) {}
-    std::string toString() { return "IDENTIFIER"; }
+    std::string toString() { return std::string("IDENTIFIER (") + name_ + ")"; }
 
    private:
     std::string name_;
   };
 
+  class PropertyAccess : public Expr
+  {
+   public:
+    PropertyAccess(Expr *owner, Expr *property)
+    : owner_(owner), property_(property) {}
+    std::string toString()
+    {
+      return owner_->toString() + "  " + property_->toString();
+    }
+
+   private:
+    Expr *owner_;
+    Expr *property_;
+  };
+
   class Dim : public Node
   {
    public:
-    Dim(const std::string &name) : name_(name) {}
-    std::string toString() { return "DIM"; }
+    Dim(const std::string &name, Expr *val)
+    : name_(name), val_(val) {}
+    std::string toString()
+    {
+      if(!val_)
+        return "DIM";
+      else
+        return std::string("DIM ") + val_->toString();
+    }
 
    private:
     std::string name_;
+    Expr *val_;
   };
 
   class BinaryExpr : public Expr
@@ -249,7 +274,7 @@ namespace ast
    public:
     CallExpr(const std::string &callee, const std::vector<Expr *> &args)
     : callee_(callee), args_(args) {}
-    std::string toString() { return "CALL"; }
+    std::string toString() { return std::string("CALL (") + callee_ + ")"; }
 
    private:
     std::string callee_;
@@ -259,26 +284,39 @@ namespace ast
   class Function : public Node
   {
    public:
-    Function(const std::string &name, const std::vector<std::string> &args, Expr *body)
-    : name_(name), args_(args), body_(body) {}
-    std::string toString() { return std::string("FUNCTION\n") + "  " + body_->toString(); }
+    Function(const std::string &name,
+             const std::vector<std::string> &args,
+             const std::vector<Node *> &body,
+             bool sub)
+    : name_(name), args_(args), body_(body), sub_(sub) {}
+    std::string toString()
+    {
+      std::string repr(sub_ ? "SUB\n" : "FUNCTION\n");
+      for(unsigned int i = 0; i < body_.size(); i++)
+        repr += "  " + body_[i]->toString() + "\n";
+      return repr;
+    }
 
    private:
     std::string name_;
     std::vector<std::string> args_;
-    Expr *body_;
+    std::vector<Node *> body_;
+    bool sub_;
   };
 }
 
 typedef std::list<Token *> TokenList;
 typedef TokenList::const_reverse_iterator TokenIt;
 
+Token *currentToken(TokenIt &it, const TokenIt &end)
+{
+  return it != end ? *it : NULL;
+}
+
 Token *nextToken(TokenIt &it, const TokenIt &end)
 {
   it++;
-  if(it != end)
-    return *it;
-  else return NULL;
+  return currentToken(it, end);
 }
 
 ast::Node *errorN(const char *str)
@@ -307,12 +345,26 @@ int opPrecedence(char op)
     binopPrecedence['%'] = 10;
     binopPrecedence['/'] = 40;
     binopPrecedence['*'] = 40;  // highest.
+    binopPrecedence['.'] = 1000;
   }
     
   int precedence = binopPrecedence[op];
   if (precedence <= 0) return -1;
   return precedence;
 }
+
+#define EXPECT_TOKEN(t, expected, func, error) \
+  { if(!t || t->type != expected)                  \
+      return func(error); }
+
+#define EXPECT_TOKEN_N(t, expected, error)      \
+  EXPECT_TOKEN(t, expected, errorN, error)
+
+#define EXPECT_TOKEN_E(t, expected, error)      \
+  EXPECT_TOKEN(t, expected, errorE, error)
+
+#define EXPECT_ANY_TOKEN(t, func, error) \
+  { if(!t) return func(error); }
 
 ast::Expr *parseLiteral(TokenIt &it, const TokenIt &end)
 {
@@ -325,50 +377,71 @@ ast::Expr *parseExpr(TokenIt &it, const TokenIt &end);
 
 ast::Expr *parseParenExpr(TokenIt &it, const TokenIt &end)
 {
-  nextToken(it, end);
+  Token *current = nextToken(it, end);
   ast::Expr *node = parseExpr(it, end);
-  if((*it)->type != Token::RPAREN)
-    return errorE("Expected ')'");
+  current = currentToken(it, end);
+  EXPECT_TOKEN_E(current, Token::RPAREN, "Expected ')'");
         
   nextToken(it, end);
   return node;
 }
 
-ast::Expr *parseIdentifer(TokenIt &it, const TokenIt &end)
+ast::Expr *parseIdentifier(TokenIt &it, const TokenIt &end)
 {
-  std::string identifier = (*it)->value;
-  Token *current = nextToken(it, end);
-  if(!current || current->type != Token::LPAREN)
+  Token *current = currentToken(it, end);
+  EXPECT_ANY_TOKEN(current, errorE, "Identifier expected");
+  
+  std::string identifier = current->value;
+  current = nextToken(it, end);
+  if(!current || (current->type != Token::LPAREN &&
+                 current->type != Token::PROPERTY_ACCESS))
     return new ast::Identifier(identifier);
 
+  if(current->type == Token::LPAREN)
+  {
+    current = nextToken(it, end);
+    EXPECT_ANY_TOKEN(current, errorE, "Expression or ')' expected");
+    
+    std::vector<ast::Expr *> args;
+    if(current->type != Token::RPAREN)
+      while(1)
+      {
+        ast::Expr *arg = parseExpr(it, end);
+        if(!arg) return NULL;
+        args.push_back(arg);
+
+        current = currentToken(it, end);
+        EXPECT_ANY_TOKEN(current, errorE, "Expected ')' or ','");
+
+        if(current->type == Token::RPAREN)
+          break;
+        else if(current->type != Token::COMMA)
+          return errorE("Expected ')' or ','");
+
+        current = nextToken(it, end);
+      }
+
+    nextToken(it, end);
+    return new ast::CallExpr(identifier, args);
+  }
+
   current = nextToken(it, end);
-  std::vector<ast::Expr *> args;
-  if(current->type != Token::RPAREN)
-    while(1)
-    {
-      ast::Expr *arg = parseExpr(it, end);
-      if(!arg) return NULL;
-      args.push_back(arg);
+  EXPECT_TOKEN_E(current, Token::IDENTIFIER, "Identifier expected after '.'");
 
-      current = *it;
-
-      if(current->type == Token::RPAREN)
-        break;
-      else if(current->type != Token::COMMA)
-        return errorE("Expected ')' or ','");
-
-      current = nextToken(it, end);
-    }
-
-  nextToken(it, end);
-  return new ast::CallExpr(identifier, args);
+  ast::Expr *property = parseIdentifier(it, end);
+  //if(!property)
+    return errorE("Identifier expected after '.'");
+  //return new ast::PropertyAccess(identifier, property);
 }
 
 ast::Expr *parsePrimary(TokenIt &it, const TokenIt &end)
 {
-  switch((*it)->type)
+  Token *current = currentToken(it, end);
+  EXPECT_ANY_TOKEN(current, errorE, "Expected a primary expression");
+  
+  switch(current->type)
   {
-    case Token::IDENTIFIER: return parseIdentifer(it, end);
+    case Token::IDENTIFIER: return parseIdentifier(it, end);
     case Token::NUMBER:     return parseLiteral(it, end);
     case Token::LPAREN:     return parseParenExpr(it, end);
     default:                return errorE("Unexpected token when expecting an expression");
@@ -378,18 +451,29 @@ ast::Expr *parsePrimary(TokenIt &it, const TokenIt &end)
 ast::Node *parseDim(TokenIt &it, const TokenIt &end)
 {
   Token *current = nextToken(it, end);
-  
-  if(!current || current->type != Token::IDENTIFIER)
-    return errorN("Expected identifier");
+  EXPECT_TOKEN_N(current, Token::IDENTIFIER, "Expected identifier");
 
-  ast::Node *dim = new ast::Dim(current->value);
+  std::string name = current->value;
+
+  current = nextToken(it, end);
+  //FIXME: Dim foo 5
+  if(!current || current->type != Token::EQUALS)
+    return new ast::Dim(name, NULL);
+
   nextToken(it, end);
-  return dim;
+  ast::Expr *val = parseExpr(it, end);
+  if(!val)
+    return errorN("Expected expression");
+  
+  return new ast::Dim(name, val);
 }
 
 ast::Node *parseStatement(TokenIt &it, const TokenIt &end)
 {
-  switch((*it)->type)
+  Token *current = currentToken(it, end);
+  EXPECT_ANY_TOKEN(current, errorN, "Statement expected");
+  
+  switch(current->type)
   {
     case Token::DIM: return parseDim(it, end);
     default:         return parseExpr(it, end);
@@ -400,7 +484,9 @@ ast::Expr *parseBinOpRHS(int exprPrecendence, ast::Expr *lhs, TokenIt &it, const
 {
   while(1)
   {
-    char binOp = it != end ? (*it)->value.c_str()[0] : 0;
+    Token *current = currentToken(it, end);
+    
+    char binOp = current ? current->value.c_str()[0] : 0;
     int precendence = opPrecedence(binOp);
     if(precendence < exprPrecendence)
       return lhs;
@@ -409,7 +495,9 @@ ast::Expr *parseBinOpRHS(int exprPrecendence, ast::Expr *lhs, TokenIt &it, const
     if(!rhs)
       return NULL;
 
-    int nextPrecedence = opPrecedence(it != end ? (*it)->value.c_str()[0] : 0);
+    current = currentToken(it, end);
+
+    int nextPrecedence = opPrecedence(current ? current->value.c_str()[0] : 0);
     if(precendence < nextPrecedence)
     {
       rhs = parseBinOpRHS(precendence + 1, rhs, it, end);
@@ -429,6 +517,66 @@ ast::Expr *parseExpr(TokenIt &it, const TokenIt &end)
   return parseBinOpRHS(NULL, lhs, it, end);
 }
 
+ast::Node *parseFunction(TokenIt &it, const TokenIt &end, bool sub)
+{
+  Token *current = nextToken(it, end);
+  EXPECT_TOKEN_N(current, Token::IDENTIFIER, "Expected function identifier");
+
+  std::string name = current->value;
+  
+  current = nextToken(it, end);
+  EXPECT_TOKEN_N(current, Token::LPAREN, "Expected '('");
+
+  std::vector<std::string> args;
+  while(1)
+  {
+    current = nextToken(it, end);
+    if(current && current->type == Token::IDENTIFIER)
+    {
+      args.push_back(current->value);
+      current = nextToken(it, end);
+      if(current->type == Token::RPAREN)
+        break;
+      EXPECT_TOKEN_N(current, Token::COMMA, "Expected ',' in arg list");
+    }
+    else break;
+  }
+
+  EXPECT_TOKEN_N(current, Token::RPAREN, "Expected ')'");
+  current = nextToken(it, end);
+  std::vector<ast::Node *> body;
+  while(1)
+  {
+    current = currentToken(it, end);
+    EXPECT_ANY_TOKEN(current, errorN, "Statement or function end expected");
+
+    if(current->type == Token::END)
+      break;
+
+    if(ast::Node *stmt = parseStatement(it, end))
+      body.push_back(stmt);
+    else return errorN("Statement or function end expected");
+  }
+
+  current = nextToken(it, end);
+  EXPECT_TOKEN_N(current, (sub ? Token::SUB : Token::FUNCTION),
+                 "Function end expected");
+
+  nextToken(it, end);
+  
+  return new ast::Function(name, args, body, sub);
+}
+
+ast::Node *parseTopLevel(TokenIt &it, const TokenIt &end)
+{
+  switch((*it)->type)
+  {
+    case Token::FUNCTION:   return parseFunction(it, end, false);
+    case Token::SUB:        return parseFunction(it, end, true);
+    default:                return parseStatement(it, end);
+  }
+}
+
 typedef std::list<ast::Node *> ASTNodeList;
 typedef ASTNodeList::reverse_iterator ASTNodeListIt;
 
@@ -439,7 +587,7 @@ ASTNodeList *generateAST(const TokenList &tokens)
   TokenIt it = tokens.rbegin(), end = tokens.rend();
   while(it != end)
   {
-    node = parseStatement(it, end);
+    node = parseTopLevel(it, end);
     if(node)
       ast->push_back(node);
     else break;
@@ -473,6 +621,7 @@ int main(int /*argc*/, char */*argv*/[])
 
     std::cin.clear();
   } while(tokens.size());
-        
+
+  std::cout << std::endl;
   return 0;
 }

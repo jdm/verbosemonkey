@@ -4,7 +4,8 @@ import os.path
 import glob
 import subprocess
 from optparse import OptionParser
-
+unsafe {
+    }
 def main(argc, argv):
     parser = OptionParser()
     parser.add_option('-e', '--expand', dest="expandFailures",
